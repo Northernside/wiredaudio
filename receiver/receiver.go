@@ -3,12 +3,13 @@ package receiver
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
 	"os"
 	"os/exec"
-	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,16 +25,13 @@ var (
 	sampleSquares float64
 	sampleCount   int
 
-	// ansi 256-color codes for volume meter
-	colors = []int{
-		22, 34, 76, 82, 148,
-		184, 220, 214, 208, 202,
-		196, 88, 52,
-	}
+	monitorClients []net.Conn
+	monitorLock    sync.Mutex
 )
 
 func Start() {
 	go discoveryServer()
+	go monitorServer()
 
 	// listen for incoming audio udp packets
 	addr := net.UDPAddr{
@@ -75,7 +73,12 @@ func Start() {
 				dbfs = -100 // clamp minimum value
 			}
 
-			fmt.Fprintf(os.Stdout, "\rVolume: %6.2f dBFS %s\033[K", dbfs, levelBar(dbfs))
+			msg := fmt.Sprintf("%.2f\n", dbfs)
+			monitorLock.Lock()
+			for _, conn := range monitorClients {
+				conn.Write([]byte(msg))
+			}
+			monitorLock.Unlock()
 
 			sampleSquares = 0
 			sampleCount = 0
@@ -140,58 +143,46 @@ func discoveryServer() {
 	}
 }
 
-func levelBar(dbfs float64) string {
-	// normalize to 0–13 blocks, start at -60 dBFS bc we want to ignore super quiet noise
-	totalBlocks := (dbfs + 60) / 5
-	if totalBlocks < 0 {
-		totalBlocks = 0
-	} else if totalBlocks > float64(maxBlocks) {
-		totalBlocks = float64(maxBlocks)
+func monitorServer() {
+	socketPath := "/tmp/wiredaudio.sock"
+	os.Remove(socketPath) //recreate
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		log.Fatal("monitor socket listen failed:", err)
 	}
 
-	fullBlocks := int(totalBlocks)
-	frac := totalBlocks - float64(fullBlocks)
+	log.Println("monitor server on", socketPath)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Println("monitor accept error:", err)
+				continue
+			}
 
-	var fracBlock string
-	switch {
-	case frac >= 7.0/8.0:
-		fracBlock = "▉"
-	case frac >= 3.0/4.0:
-		fracBlock = "▊"
-	case frac >= 5.0/8.0:
-		fracBlock = "▋"
-	case frac >= 1.0/2.0:
-		fracBlock = "▌"
-	case frac >= 3.0/8.0:
-		fracBlock = "▍"
-	case frac >= 1.0/4.0:
-		fracBlock = "▎"
-	case frac >= 1.0/8.0:
-		fracBlock = "▏"
-	default:
-		fracBlock = ""
-	}
+			monitorLock.Lock()
+			monitorClients = append(monitorClients, conn)
+			monitorLock.Unlock()
 
-	var sb strings.Builder
-	sb.WriteString("[")
+			go func(c net.Conn) {
+				defer c.Close()
+				log.Println("monitor client connected")
 
-	for i := range fullBlocks {
-		colorCode := colors[i]
-		sb.WriteString(fmt.Sprintf("\x1b[38;5;%dm█", colorCode))
-	}
+				// keep until broken
+				_, _ = io.Copy(io.Discard, c)
 
-	// fractional block handling (if any)
-	if fracBlock != "" && fullBlocks < maxBlocks {
-		colorCode := colors[fullBlocks]
-		sb.WriteString(fmt.Sprintf("\x1b[38;5;%dm%s", colorCode, fracBlock))
-		fullBlocks++
-	}
+				monitorLock.Lock()
+				for i, cc := range monitorClients {
+					if cc == c {
+						monitorClients = append(monitorClients[:i], monitorClients[i+1:]...)
+						break
+					}
+				}
+				monitorLock.Unlock()
 
-	for i := fullBlocks; i < maxBlocks; i++ {
-		sb.WriteString(" ")
-	}
-
-	sb.WriteString("\x1b[0m]")
-
-	return sb.String()
+				log.Println("monitor client disconnected")
+			}(conn)
+		}
+	}()
 }

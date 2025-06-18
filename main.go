@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"wiredaudio/monitor"
 	"wiredaudio/receiver"
 	"wiredaudio/sender"
 )
@@ -13,6 +14,7 @@ func main() {
 		fmt.Printf("Usage: %s <command>\n\nCommands:\n", os.Args[0])
 		fmt.Println("  receive")
 		fmt.Println("  send")
+		fmt.Println("  monitor")
 		return
 	}
 
@@ -21,6 +23,8 @@ func main() {
 		receiver.Start()
 	case "send":
 		sender.Start()
+	case "monitor":
+		monitor.Start()
 	default:
 		fmt.Printf("Unknown command: %s\n", args[0])
 		fmt.Println("Available commands: receive, send")
